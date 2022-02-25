@@ -1,18 +1,16 @@
 use axum::{
-    extract::MatchedPath,
-    http::{Request, StatusCode},
-    response::IntoResponse,
-    routing::get,
-    Router,
+    extract::MatchedPath, http::Request, response::IntoResponse, routing::get, Json, Router,
 };
 use axum_extra::middleware::{self, Next};
-use hyper::{Body, Client, Method, Response};
+use hyper::{client::HttpConnector, Client, Uri};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use serde::{Deserialize, Serialize};
 use std::{
     future::ready,
     net::SocketAddr,
     time::{Duration, Instant},
 };
+use uuid::Uuid;
 
 #[tokio::main]
 async fn main() {
@@ -31,25 +29,31 @@ async fn main() {
 async fn start() -> anyhow::Result<()> {
     let recorder_handler = setup_metrics_recorder()?;
 
+    let ping = Router::new().route("/", get(|| async { "ok" }));
     let fast = Router::new()
         .route("/", get(fast))
-        //　基本コールされる。しかし以下のパスにマッチするものはコールされない。。へー
+        // fastだけ下記のレイヤーが適応される
         .layer(middleware::from_fn(layer_call));
 
     let slow = Router::new().route("/", get(slow));
     let metrics = Router::new().route("/", get(move || ready(recorder_handler.render())));
-    let weather = Router::new().route("/", get(weather));
 
     let app = Router::new()
+        .nest("/", ping)
         .nest("/fast", fast)
         .nest("/slow", slow)
         .nest("/metrics", metrics)
-        .nest("/weather", weather)
         // routing pathに、matchした場合にコールされる。
         .route_layer(middleware::from_fn(track_metrics));
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 9000));
     tracing::debug!("listening on {}", addr);
+
+    // loop
+    tokio::spawn(async {
+        tracing::info!("loop start !");
+        polling_requests().await;
+    });
 
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
@@ -58,39 +62,117 @@ async fn start() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Serialize, Clone)]
+struct Message {
+    id: Uuid,
+    text: String,
+}
+
 async fn fast() -> impl IntoResponse {
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    "fast"
+    let message = Message {
+        id: Uuid::new_v4(),
+        text: "fast".into(),
+    };
+    Json(message)
+    // (StatusCode::OK, Json(todo));
 }
 
 async fn slow() -> impl IntoResponse {
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     "slow"
 }
 
-async fn weather() -> impl IntoResponse {
-    // request
-    let url = "http://100.64.1.151/weather".parse().unwrap();
+async fn polling_requests() {
+    let host = match std::env::var("TARGET_URL") {
+        Ok(val) => {
+            tracing::info!("enable polling");
+            val
+        }
+        Err(_err) => {
+            tracing::info!("TARGET_URL is not set");
+            tracing::info!("disable polling");
+            return;
+        }
+    };
 
-    let client = Client::new();
-    // Fetch the url...
-    let res = client.get(url).await.unwrap();
+    // request client
+    let client = Client::builder()
+        .pool_idle_timeout(Some(Duration::from_secs(30)))
+        // .http2_only(true)
+        .build_http();
 
-    tracing::info!("Response: {}", &res.status());
-    // asynchronously aggregate the chunks of the body
-    // let body = hyper::body::aggregate(res).await.unwrap();
+    ////
+    loop {
+        let (weather_result, lux_result) = tokio::join!(
+            fetch::<Weather>(&client, format!("{}{}", host, "/weather")),
+            fetch::<Lux>(&client, format!("{}{}", host, "/lux"))
+        );
 
-    let aa = hyper::body::to_bytes(res.into_body()).await.unwrap();
+        match weather_result {
+            Ok(weather) => {
+                tracing::debug!("{:?}", &weather);
+                metrics::increment_counter!("weather_requests_success_total");
+                metrics::gauge!("weather_humidity", weather.humidity);
+                metrics::gauge!("weather_pressure", weather.pressure);
+                metrics::gauge!("weather_temperature", weather.temp);
+            }
+            Err(e) => {
+                tracing::error!("weather error: {}", e);
+                metrics::increment_counter!("weather_requests_fail_total");
+            }
+        }
+        match lux_result {
+            Ok(lux) => {
+                tracing::debug!("{:?}", &lux);
+                metrics::increment_counter!("lux_requests_success_total");
+                metrics::gauge!("lux_in_the_room ", lux.lux);
+            }
+            Err(e) => {
+                tracing::error!("lux error: {}", e);
+                metrics::increment_counter!("lux_requests_fail_total");
+            }
+        }
 
-    tracing::info!("body: {}", String::from_utf8(aa.to_vec()).unwrap());
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+}
 
-    (StatusCode::OK, "ok")
+async fn fetch<T: for<'de> Deserialize<'de>>(
+    client: &hyper::Client<HttpConnector>,
+    path: String,
+) -> anyhow::Result<T> {
+    let uri = path.parse::<Uri>()?;
+    let res = client.get(uri.clone()).await?;
+    tracing::debug!("Response: {}", &res.status());
+
+    if !res.status().is_success() {
+        return Err(anyhow::anyhow!("failed to fetch {}", uri));
+    }
+    let body = hyper::body::to_bytes(res.into_body()).await?;
+    let json: T = serde_json::from_slice(&body)?;
+    Ok(json)
+}
+
+#[derive(Deserialize, Debug)]
+struct Weather {
+    humidity: f64,
+    pressure: f64,
+    temp: f64,
+    // humidityUnit: String,
+    // pressureUnit: String,
+    // tempUnit: String,
+    // timestamp: f64,
+}
+
+#[derive(Deserialize, Debug)]
+struct Lux {
+    lux: f64,
+    // luxUnit: String,
+    // timestamp: f64,
 }
 
 fn setup_metrics_recorder() -> anyhow::Result<PrometheusHandle> {
-    const EXPONENTIAL_SECONDS: &[f64] = &[
-        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-    ];
+    const EXPONENTIAL_SECONDS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
 
     let handler = PrometheusBuilder::new()
         .set_quantiles(&[0.5, 0.9, 0.99])?
@@ -102,12 +184,13 @@ fn setup_metrics_recorder() -> anyhow::Result<PrometheusHandle> {
     Ok(handler)
 }
 
-async fn layer_call<B>(_req: Request<B>, _next: Next<B>) -> impl IntoResponse {
-    tracing::info!("呼ばれたよ");
-    ()
+async fn layer_call<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
+    tracing::info!("called....");
+    let response = next.run(req).await;
+    response
 }
 async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
-    tracing::info!("start!!!!!");
+    tracing::info!("start !!!");
 
     let start = Instant::now();
     let path = if let Some(matched_path) = req.extensions().get::<MatchedPath>() {
@@ -126,8 +209,5 @@ async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
 
     metrics::increment_counter!("http_requests_total", &labels);
     metrics::histogram!("http_requests_duration_seconds", latency, &labels);
-    metrics::increment_counter!("aaaaaaaaa", &labels);
-    metrics::histogram!("bbbbbbbb", latency, &labels);
-
     response
 }
