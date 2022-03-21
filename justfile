@@ -6,7 +6,7 @@ set dotenv-load := true
 ##### variables ######
 app_name        := `cargo metadata --format-version=1 --no-deps | jq .packages[0].name | sed -e 's/"//g'`
 app_version     := "v" + `cargo metadata --format-version=1 --no-deps | jq .packages[0].version | sed -e 's/"//g'`
-
+image_name     := "mk10969/" + app_name
 
 ##### commands ######
 # app name
@@ -19,19 +19,19 @@ version:
 
 # build container image
 docker-build:
-    docker build ./ -t {{ app_name }}:{{ app_version }}
+    docker build ./ -t {{ image_name }}:{{ app_version }}
 
 # run docker container
 docker-run: docker-build
     docker run -d \
         --env-file .env \
         -p 9000:9000 \
-        {{ app_name }}:{{ app_version }}
+        {{ image_name }}:{{ app_version }}
 
 # rm docker container
 docker-stop:
     docker ps \
-        | grep "{{ app_name }}:{{ app_version }}" \
+        | grep "{{ image_name }}:{{ app_version }}" \
         | cut -d ' ' -f 1 \
         | xargs docker rm -f
 

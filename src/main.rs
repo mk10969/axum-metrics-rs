@@ -12,6 +12,9 @@ use std::{
 };
 use uuid::Uuid;
 
+mod handlers;
+mod services;
+
 #[tokio::main]
 async fn main() {
     // Set the RUST_LOG, if it hasn't been explicitly defined
@@ -43,15 +46,16 @@ async fn start() -> anyhow::Result<()> {
         .nest("/fast", fast)
         .nest("/slow", slow)
         .nest("/metrics", metrics)
+        // .nest("/postgres", postgres)
         // routing pathに、matchした場合にコールされる。
         .route_layer(middleware::from_fn(track_metrics));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 9000));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 9000));
     tracing::debug!("listening on {}", addr);
 
     // loop
     tokio::spawn(async {
-        tracing::info!("loop start !");
+        tracing::info!("polling request.");
         polling_requests().await;
     });
 
@@ -82,18 +86,38 @@ async fn slow() -> impl IntoResponse {
     "slow"
 }
 
+fn create_uri(uri: &Uri, path: &str) -> Uri {
+    Uri::builder()
+        .scheme(uri.scheme_str().unwrap_or("http"))
+        .authority(uri.host().unwrap_or("127.0.0.1"))
+        .path_and_query(path)
+        .build()
+        .expect("invalid uri.")
+}
+
+fn parse_uri() -> anyhow::Result<Uri> {
+    let target_url = std::env::var("TARGET_URL")?;
+    let base_uri: Uri = target_url.parse::<Uri>()?;
+    base_uri
+        .scheme_str()
+        .ok_or_else(|| anyhow::anyhow!("target url must have scheme"))?;
+    base_uri
+        .host()
+        .ok_or_else(|| anyhow::anyhow!("target url must have host"))?;
+    Ok(base_uri)
+}
+
 async fn polling_requests() {
-    let host = match std::env::var("TARGET_URL") {
-        Ok(val) => {
-            tracing::info!("enable polling");
-            val
-        }
-        Err(_err) => {
-            tracing::info!("TARGET_URL is not set");
-            tracing::info!("disable polling");
+    let base_uri = match parse_uri() {
+        Ok(uri) => uri,
+        Err(e) => {
+            tracing::error!("failed: {}", e);
             return;
         }
     };
+    // create uri
+    let weather: Uri = create_uri(&base_uri, "/weather");
+    let lux: Uri = create_uri(&base_uri, "/lux");
 
     // request client
     let client = Client::builder()
@@ -104,8 +128,8 @@ async fn polling_requests() {
     ////
     loop {
         let (weather_result, lux_result) = tokio::join!(
-            fetch::<Weather>(&client, format!("{}{}", host, "/weather")),
-            fetch::<Lux>(&client, format!("{}{}", host, "/lux"))
+            fetch::<Weather>(&client, &weather),
+            fetch::<Lux>(&client, &lux)
         );
 
         match weather_result {
@@ -139,10 +163,9 @@ async fn polling_requests() {
 
 async fn fetch<T: for<'de> Deserialize<'de>>(
     client: &hyper::Client<HttpConnector>,
-    path: String,
+    uri: &Uri,
 ) -> anyhow::Result<T> {
-    let uri = path.parse::<Uri>()?;
-    let res = client.get(uri.clone()).await?;
+    let res = client.get(uri.to_owned()).await?;
     tracing::debug!("Response: {}", &res.status());
 
     if !res.status().is_success() {
