@@ -1,6 +1,6 @@
 [package]
 name = "axum-metrics-rs"
-version = "0.3.0"
+version = "0.3.2"
 edition = "2021"
 
 [features]
@@ -9,8 +9,7 @@ default = []
 
 [dependencies]
 ##### web #####
-axum = { version = "0.4.5", features = ["default"] }
-axum-extra = "0.1.2"
+axum = { version = "0.5.1", features = ["default"] }
 tokio = { version = "1.16.1", features = ["full"] }
 hyper = { version = "0.14", features = ["full"] }
 
@@ -44,4 +43,4 @@ serde = { version = "1.0.136", features = ["derive"] }
 anyhow = "1.0.51"
 quanta = { version = "0.9.3", default-features = false }
 rand = "0.8.5"
-uuid = { version = "0.8", features = ["serde", "v4"] }
+uuid = { version = "1.0.0", features = ["serde", "v4"] }

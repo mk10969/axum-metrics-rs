@@ -1,7 +1,12 @@
 use axum::{
-    extract::MatchedPath, http::Request, response::IntoResponse, routing::get, Json, Router,
+    extract::MatchedPath,
+    http::Request,
+    middleware::{self, Next},
+    response::IntoResponse,
+    routing::get,
+    Json, Router,
 };
-use axum_extra::middleware::{self, Next};
+
 use hyper::{client::HttpConnector, Client, Uri};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use serde::{Deserialize, Serialize};
@@ -212,6 +217,7 @@ async fn layer_call<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
     let response = next.run(req).await;
     response
 }
+
 async fn track_metrics<B>(req: Request<B>, next: Next<B>) -> impl IntoResponse {
     tracing::info!("start !!!");
 

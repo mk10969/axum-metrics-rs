@@ -1,5 +1,5 @@
 ##### build container #####
-FROM rust:1.58.1 as builder
+FROM rust:1.60.0 as builder
 
 # RUN apt update; \
 #     # https://docs.rs/openssl/0.10.32/openssl/

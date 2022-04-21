@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use axum::{routing::get, AddExtensionLayer, Router};
+use axum::{routing::get, Extension, Router};
 use sqlx::{postgres::PgPoolOptions, PgPool};
 
 use crate::services::hello::{using_connection_extractor, using_connection_pool_extractor};
@@ -22,7 +22,7 @@ pub async fn postgres_handler() -> anyhow::Result<Router> {
             "/",
             get(using_connection_pool_extractor).post(using_connection_extractor),
         )
-        .layer(AddExtensionLayer::new(pool));
+        .layer(Extension(pool));
 
     Ok(postgres)
 }
